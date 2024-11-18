@@ -1,0 +1,58 @@
+diff --git a/i3status.c b/i3status.c
+index 0898da3..55a0974 100644
+--- a/i3status.c
++++ b/i3status.c
+@@ -612,6 +612,8 @@ int main(int argc, char *argv[]) {
+         output_format = O_LEMONBAR;
+     else if (strcasecmp(output_str, "term") == 0)
+         output_format = O_TERM;
++    else if (strcasecmp(output_str, "simula") == 0)
++        output_format = O_SIMULA;
+     else if (strcasecmp(output_str, "none") == 0)
+         output_format = O_NONE;
+     else
+diff --git a/include/i3status.h b/include/i3status.h
+index 217376a..ea02d40 100644
+--- a/include/i3status.h
++++ b/include/i3status.h
+@@ -7,7 +7,8 @@ typedef enum {
+     O_I3BAR,
+     O_LEMONBAR,
+     O_TERM,
+-    O_NONE
++    O_NONE,
++    O_SIMULA
+ } output_format_t;
+ extern output_format_t output_format;
+
+diff --git a/src/output.c b/src/output.c
+index 937fa60..ddc9c96 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -40,6 +40,8 @@ char *color(const char *colorstr) {
+         int b = (col & (0xFF << 16)) / 0x800000;
+         col = (r << 2) | (g << 1) | b;
+         (void)snprintf(colorbuf, sizeof(colorbuf), "\033[3%d;1m", col);
++    } else if (output_format == O_SIMULA) {
++        (void)snprintf(colorbuf, sizeof(colorbuf), "[color=%s]", cfg_getstr(cfg_general, colorstr));
+     }
+     return colorbuf;
+ }
+@@ -51,6 +53,8 @@ char *color(const char *colorstr) {
+ char *endcolor(void) {
+     if (output_format == O_XMOBAR)
+         return "</fc>";
++    else if (output_format == O_SIMULA)
++        return "[/color]";
+     else if (output_format == O_TERM)
+         return "\033[0m";
+     else
+@@ -71,6 +75,8 @@ void print_separator(const char *separator) {
+         printf("%s%s%s", color("color_separator"), separator, endcolor());
+     else if (output_format == O_NONE)
+         printf("%s", separator);
++    else if (output_format == O_SIMULA)
++        printf("%s", separator);
+ }
+
+ /*
