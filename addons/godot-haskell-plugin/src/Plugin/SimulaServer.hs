@@ -201,17 +201,13 @@ getKeyboardAction gss keyboardShortcut =
         rightClick _ _ = return ()
 
         scrollUp :: GodotSimulaServer -> SpriteLocation -> Bool -> IO ()
-        scrollUp gss (Just (gsvs, coords@(SurfaceLocalCoordinates (sx, sy)))) True = do
-          wlrSeat <- readTVarIO (gss ^. gssWlrSeat)
-          axisScrollSpeed <- readTVarIO (gss ^. gssAxisScrollSpeed)
-          G.pointer_notify_axis_continuous wlrSeat 0 (realToFrac axisScrollSpeed)
+        scrollUp _ (Just (gsvs, coords@(SurfaceLocalCoordinates (sx, sy)))) True = do
+          processClickEvent' gsvs (Button True G.BUTTON_WHEEL_UP) coords
         scrollUp _ _ _ = return ()
 
         scrollDown :: GodotSimulaServer -> SpriteLocation -> Bool -> IO ()
-        scrollDown gss (Just (gsvs, coords@(SurfaceLocalCoordinates (sx, sy)))) True = do
-          wlrSeat <- readTVarIO (gss ^. gssWlrSeat)
-          axisScrollSpeed <- readTVarIO (gss ^. gssAxisScrollSpeed)
-          G.pointer_notify_axis_continuous wlrSeat 0 (-1.0 * (realToFrac axisScrollSpeed))
+        scrollDown _ (Just (gsvs, coords@(SurfaceLocalCoordinates (sx, sy)))) True = do
+          processClickEvent' gsvs (Button True G.BUTTON_WHEEL_DOWN) coords
         scrollDown _ _ _ = return ()
 
   
@@ -453,7 +449,6 @@ getKeyboardAction gss keyboardShortcut =
           worldEnv@(worldEnvironment, _) <- readTVarIO (gss ^. gssWorldEnvironment)
           textures <- loadEnvironmentTextures gss worldEnvironment
           atomically $ writeTVar (gss ^. gssEnvironmentTextures) textures
-          atomically $ writeTVar (gss ^. gssAxisScrollSpeed) (configuration ^. axisScrollSpeed)
           atomically $ writeTVar (gss ^. gssMouseSensitivityScaler) (configuration ^. mouseSensitivityScaler)
         reloadConfig _ _ = return ()
 
@@ -910,7 +905,6 @@ parseConfiguration = do
         }
     , _defaultWindowResolution = Just (900, 900)
     , _defaultWindowScale = 1.0
-    , _axisScrollSpeed = 0.03
     , _mouseSensitivityScaler = 1.00
     , _keyBindings = 
         [ KeyboardShortcut ["KEY_MASK_META", "KEY_BACKSPACE"] "terminateWindow"
@@ -1024,8 +1018,6 @@ initGodotSimulaServer obj = do
       let numberOfStartingApps = length sApps
       gssStartingApps' <- newTVarIO sApps
 
-      gssAxisScrollSpeed' <- newTVarIO (configuration ^. axisScrollSpeed)
-
       gssMouseSensitivityScaler' <- newTVarIO (configuration ^. mouseSensitivityScaler)
 
       panoramaSky      <- unsafeInstance GodotPanoramaSky "PanoramaSky"
@@ -1061,6 +1053,11 @@ initGodotSimulaServer obj = do
       let gssPid' = show pid
 
       gssStartingAppPids' <- newTVarIO M.empty :: IO (TVar (M.Map ProcessID [String]))
+      -- Starting apps launch placement system:
+      -- First try launchToken -> location, then fallback to launchToken -> class and class -> [...location queue...]
+      gssStartingAppLaunchTokens' <- newTVarIO M.empty :: IO (TVar (M.Map String String))
+      gssStartingAppLaunchTokenClassHints' <- newTVarIO M.empty :: IO (TVar (M.Map String String))
+      gssStartingAppWindowClassHints' <- newTVarIO M.empty :: IO (TVar (M.Map String [String]))
 
       gssGrab' <- newTVarIO Nothing
 
@@ -1149,7 +1146,6 @@ initGodotSimulaServer obj = do
       , _gssConfiguration         = gssConfiguration'         :: TVar Configuration
       , _gssKeyboardShortcuts     = gssKeyboardShortcuts'     :: TVar KeyboardShortcuts
       , _gssKeyboardRemappings    = gssKeyboardRemappings'    :: TVar KeyboardRemappings
-      , _gssAxisScrollSpeed       = gssAxisScrollSpeed'       :: TVar Double
       , _gssMouseSensitivityScaler = gssMouseSensitivityScaler' :: TVar Double
       , _gssStartingApps          = gssStartingApps'          :: TVar [String]
       , _gssWorldEnvironment      = gssWorldEnvironment'      :: TVar (GodotWorldEnvironment, String)
@@ -1157,6 +1153,9 @@ initGodotSimulaServer obj = do
       , _gssStartingAppTransform  = gssStartingAppTransform'  :: TVar (Maybe GodotTransform)
       , _gssPid                   = gssPid'                   :: String
       , _gssStartingAppPids       = gssStartingAppPids'       :: TVar (M.Map ProcessID [String])
+      , _gssStartingAppLaunchTokens = gssStartingAppLaunchTokens' :: TVar (M.Map String String)
+      , _gssStartingAppLaunchTokenClassHints = gssStartingAppLaunchTokenClassHints' :: TVar (M.Map String String)
+      , _gssStartingAppWindowClassHints = gssStartingAppWindowClassHints' :: TVar (M.Map String [String])
       , _gssGrab                  = gssGrab'                  :: TVar (Maybe Grab)
       , _gssDiffMap               = gssDiffMap'               :: TVar (M.Map GodotSpatial GodotTransform)
       , _gssWorkspaces            = gssWorkspaces'            :: Vector GodotSpatial
@@ -1307,11 +1306,19 @@ _input gss [eventGV] = do
     let event' = GodotInputEventMouseButton (coerce event)
     pressed <- G.is_pressed event'
     button <- G.get_button_index event'
-    wlrSeat <- readTVarIO (gss ^. gssWlrSeat)
-    axisScrollSpeed <- readTVarIO (gss ^. gssAxisScrollSpeed)
     case (maybeActiveGSVS, button) of
-         (Just gsvs, G.BUTTON_WHEEL_UP) -> G.pointer_notify_axis_continuous wlrSeat 0 (realToFrac axisScrollSpeed)
-         (Just gsvs, G.BUTTON_WHEEL_DOWN) -> G.pointer_notify_axis_continuous wlrSeat 0 (-1.0 * (realToFrac axisScrollSpeed))
+         (Just gsvs, G.BUTTON_WHEEL_UP) -> do
+           when pressed $ do
+             screenshotMode <- readTVarIO (gsvs ^. gsvsScreenshotMode)
+             unless screenshotMode $ do
+               activeGSVSCursorPos <- readTVarIO (gsvs ^. gsvsCursorCoordinates)
+               processClickEvent' gsvs (Button True G.BUTTON_WHEEL_UP) activeGSVSCursorPos
+         (Just gsvs, G.BUTTON_WHEEL_DOWN) -> do
+           when pressed $ do
+             screenshotMode <- readTVarIO (gsvs ^. gsvsScreenshotMode)
+             unless screenshotMode $ do
+               activeGSVSCursorPos <- readTVarIO (gsvs ^. gsvsCursorCoordinates)
+               processClickEvent' gsvs (Button True G.BUTTON_WHEEL_DOWN) activeGSVSCursorPos
          (Just gsvs, _) -> do
            putStrLn $ "Mouse event button: " ++ show button
            screenshotMode <- readTVarIO (gsvs ^. gsvsScreenshotMode)

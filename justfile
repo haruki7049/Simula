@@ -3,9 +3,26 @@ build:
   just build-monado && \
   just build-wlroots && \
   just build-godot && \
+  just build-godot-openxr && \
   source ./utils/Helpers.sh && patchGodotWlroots && \
   just build-godot-haskell-plugin && \
   just switch-to-local
+
+build-profiling:
+  nix build && \
+  just build-monado && \
+  just build-wlroots && \
+  just build-godot && \
+  just build-godot-openxr && \
+  source ./utils/Helpers.sh && patchGodotWlroots && \
+  just build-godot-haskell-plugin-profiling && \
+  just switch-to-local-profiling
+
+build-simula-rgp:
+  nix build .#simula-rgp
+
+build-simula-monado-service-rgp:
+  nix build .#simula-monado-service-rgp
 
 direnv_allow:
   find . -name '.envrc' -execdir direnv allow \;
@@ -28,8 +45,14 @@ build-godot:
 build-godot-watch:
   nix develop ./submodules/godot# --command bash -c "cd ./submodules/godot && just build-watch"
 
+build-godot-openxr:
+  nix develop ./submodules/godot-openxr# --command bash -c "cd ./submodules/godot-openxr && just build && just install"
+
 build-godot-haskell-plugin:
   cd ./addons/godot-haskell-plugin && just build && cd -
+
+build-godot-haskell-plugin-profiling:
+  cd ./addons/godot-haskell-plugin && just build-profiling && cd -
 
 clean-godot-haskell-plugin:
   cd ./addons/godot-haskell-plugin && just clean && cd -
@@ -39,6 +62,9 @@ switch-to-nix:
 
 switch-to-local:
   cd ./addons/godot-haskell-plugin && just switch-to-local && cd -
+
+switch-to-local-profiling:
+  cd ./addons/godot-haskell-plugin && just switch-to-local-profiling && cd -
 
 build-godot-haskell-plugin-watch:
   cd ./addons/godot-haskell-plugin && just switch-to-local && just build-watch && cd -
@@ -54,3 +80,17 @@ run-monado:
 
 run:
   ./result/bin/simula --local
+
+run-simula-rgp:
+  nix run .#simula-rgp -- --local
+
+run-simula-monado-service-rgp:
+  nix run .#simula-monado-service-rgp -- --local
+
+run-profiling:
+  ts="$(date -u +%Y%m%dT%H%M%SZ)" && \
+  out_dir="./profiling/godot-haskell-plugin/${ts}" && \
+  mkdir -p "$out_dir" && \
+  echo "Profiling output directory: $out_dir" && \
+  SIMULA_HS_PROFILE_PREFIX="$out_dir/godot-haskell-plugin" \
+  ./result/bin/simula --local 2>&1 | tee "$out_dir/simula.log"

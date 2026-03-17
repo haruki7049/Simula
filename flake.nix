@@ -7,16 +7,23 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/63dacb46bf939521bdc93981b4cbb7ecb58427a0";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     systems.url = "github:nix-systems/x86_64-linux";
-    godot.url = "git+https://github.com/SimulaVR/godot?rev=d4bfd13c124cae3393aacfdf97433bb1e8f79d92&submodules=1";
-    godot-haskell.url = "git+https://github.com/SimulaVR/godot-haskell?rev=b06876dcd2add327778aea03ba81751a60849cc8&submodules=1";
-    monado.url = "git+https://github.com/SimulaVR/monado-xv?rev=cc3eca140e762a990bf107f5282a2ae4853e3893&submodules=1";
+    godot.url = "git+https://github.com/SimulaVR/godot?rev=1172b6b60efb77c58aa69d10dfad8b9a9565dc40&submodules=1";
+    godot-haskell = {
+      url = "git+https://github.com/SimulaVR/godot-haskell?rev=ae307f7de0c10f4e91930a156ee37bee8c79be5f&submodules=1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    monado.url = "git+https://github.com/SimulaVR/monado-xv?rev=47b52aa79efa6f39fc99502442223207ae067e6b&submodules=1";
     environments = {
       url = "git+https://github.com/SimulaVR/environments?rev=91bb3777d558e809be12bcc94f6c984487994765";
       flake = false;
     };
     i3status-fork.url = "git+https://github.com/SimulaVR/i3status?rev=f734c9fe2580b6a23bcb1d1081376ae7897bdbf2";
+    godot-openxr = {
+      url = "git+https://github.com/SimulaVR/godot-openxr?submodules=1";
+      flake = false;
+    };
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
@@ -46,6 +53,9 @@
           }:
           let
             godot-haskell = inputs.godot-haskell.packages."${system}".godot-haskell;
+            godot-openxr = pkgs.callPackage "${inputs.godot-openxr}/default.nix" { 
+              godot = inputs.godot;
+            };
             godot-haskell-plugin = pkgs.callPackage ./addons/godot-haskell-plugin { inherit godot-haskell; };
 
             # Needed to build godot-haskell-plugin locally inside a nix develop shell
@@ -56,6 +66,9 @@
             haskell-dependencies = pkgs.stdenvNoCC.mkDerivation rec {
               name = "haskell-dependencies";
               dontUnpack = true;
+
+              ghcVersion = pkgs.haskellPackages.ghc.version;
+              hostSystem = pkgs.stdenv.system;
 
               buildInputs = [
                 # godot-haskell-plugin dependencies
@@ -84,14 +97,9 @@
 
               installPhase = ''
                 mkdir -p $out/lib
-                cp -r ${
-                  lib.strings.concatStringsSep " " (
-                    builtins.map (
-                      drv:
-                      "${drv}/lib/ghc-${pkgs.haskellPackages.ghc.version}/lib/${pkgs.stdenv.system}-ghc-${pkgs.haskellPackages.ghc.version}/*.so"
-                    ) buildInputs
-                  )
-                } $out/lib
+                for drv in $buildInputs; do
+                  find "$drv" -name "*.so" -exec cp {} $out/lib \;
+                done
               '';
             };
 
@@ -103,11 +111,11 @@
               exec ${pkgs.xfce.xfce4-terminal}/bin/xfce4-terminal "$@"
             '';
 
-            midori-wrapped = pkgs.writeScriptBin "midori" ''
-              #!${pkgs.stdenv.shell}
-              export XDG_DATA_HOME=${pkgs.dejavu_fonts}/share
-              exec ${pkgs.midori}/bin/midori "$@"
-            '';
+          # midori-wrapped = pkgs.writeScriptBin "midori" ''
+          #   #!${pkgs.stdenv.shell}
+          #   export XDG_DATA_HOME=${pkgs.dejavu_fonts}/share
+          #   exec ${pkgs.midori}/bin/midori "$@"
+          # '';
 
             i3status-forked = inputs.i3status-fork.packages.${system}.default;
 
@@ -141,6 +149,99 @@
               $MONADO_BINARY 2>&1 | ${pkgs.coreutils}/bin/tee "$SIMULA_LOG_DIR/monado.log"
             '';
 
+            # `rgp` is used for Vulkan profiling on AMD GPUs
+            mkRgpWrapper =
+              {
+                targetLabel,
+                targetBin,
+                logFile,
+                extraEnv ? "",
+                extraEcho ? "",
+                extraCleanup ? "",
+              }:
+              ''
+                #!${pkgs.stdenv.shell}
+                set -euo pipefail
+
+                ts="$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%SZ)"
+                out_dir="''${SIMULA_RGP_OUTPUT_DIR:-$PWD/profiling/rgp/$ts}"
+                trigger_file="''${MESA_VK_TRACE_TRIGGER:-$out_dir/rgp.trigger}"
+                before_list="$out_dir/rgp-before.txt"
+                after_list="$out_dir/rgp-after.txt"
+                target_log="$out_dir/${logFile}"
+
+                ${pkgs.coreutils}/bin/mkdir -p "$out_dir"
+                ${pkgs.coreutils}/bin/rm -f "$trigger_file"
+                ${pkgs.findutils}/bin/find /tmp -maxdepth 1 -type f -name '*.rgp' | ${pkgs.coreutils}/bin/sort > "$before_list"
+
+                export MESA_VK_TRACE="''${MESA_VK_TRACE:-rgp}"
+                export MESA_VK_TRACE_TRIGGER="$trigger_file"
+                ${extraEnv}
+                target_bin="${targetBin}"
+
+                echo "RGP output directory: $out_dir"
+                echo "Trigger capture with: touch $trigger_file"
+                echo "Using ${targetLabel} binary: $target_bin"
+                ${extraEcho}
+                target_pid=""
+
+                cleanup() {
+                  set +e
+                  if [ -n "$target_pid" ]; then
+                    ${pkgs.coreutils}/bin/kill "$target_pid" 2>/dev/null || true
+                    wait "$target_pid" 2>/dev/null || true
+                    target_pid=""
+                  fi
+
+                  ${extraCleanup}
+
+                  ${pkgs.findutils}/bin/find /tmp -maxdepth 1 -type f -name '*.rgp' | ${pkgs.coreutils}/bin/sort > "$after_list"
+                  ${pkgs.coreutils}/bin/comm -13 "$before_list" "$after_list" | while read -r path; do
+                    if [ -n "$path" ]; then
+                      ${pkgs.coreutils}/bin/mv "$path" "$out_dir/"
+                    fi
+                  done
+
+                  ${pkgs.coreutils}/bin/ls -1 "$out_dir"/*.rgp 2>/dev/null || echo "No new .rgp captures found."
+                }
+                trap cleanup EXIT
+
+                set +e
+                "$target_bin" "$@" > >(${pkgs.coreutils}/bin/tee -a "$target_log") 2>&1 &
+                target_pid="$!"
+                wait "$target_pid"
+                status="$?"
+                target_pid=""
+                set -e
+
+                exit $status
+              '';
+
+            simulaMonadoServiceRgpContent = mkRgpWrapper {
+              targetLabel = "monado service";
+              targetBin = "./result/bin/simula-monado-service";
+              logFile = "monado-wrapper.log";
+              extraEnv = ''
+                export XRT_NO_STDIN="''${XRT_NO_STDIN:-1}"
+              '';
+              extraEcho = ''
+                echo "XRT_COMPOSITOR_LOG=$XRT_COMPOSITOR_LOG"
+              '';
+              extraCleanup = ''
+                # Ensure that rgp stops recording when the wrapper script terminates
+                ${pkgs.procps}/bin/pkill monado-service 2>/dev/null || true
+              '';
+            };
+
+            simulaRgpContent = mkRgpWrapper {
+              targetLabel = "simula";
+              targetBin = "./result/bin/simula";
+              logFile = "simula-wrapper.log";
+            };
+
+            simulaMonadoServiceRgpTool = pkgs.writeShellScriptBin "simula-monado-service-rgp" simulaMonadoServiceRgpContent;
+            simulaRgpTool = pkgs.writeShellScriptBin "simula-rgp" simulaRgpContent;
+
             cleanSourceFilter =
               name: type:
               let
@@ -173,6 +274,11 @@
               chmod -R +w $out/opt/simula/addons/godot-haskell-plugin/bin/x11/
               cp ${godot-haskell-plugin}/lib/ghc-*/lib/libgodot-haskell-plugin.so $out/opt/simula/addons/godot-haskell-plugin/bin/x11/libgodot-haskell-plugin.so
               chmod 755 $out/opt/simula/addons/godot-haskell-plugin/bin/x11/libgodot-haskell-plugin.so
+
+              # Replace pre-compiled libgodot_openxr.so with our source-built one
+              chmod -R +w $out/opt/simula/addons/godot-openxr/bin/linux/
+              cp ${godot-openxr}/bin/linux/libgodot_openxr.so $out/opt/simula/addons/godot-openxr/bin/linux/libgodot_openxr.so
+              chmod 755 $out/opt/simula/addons/godot-openxr/bin/linux/libgodot_openxr.so
             '';
 
             initiateSimulaRunner = ''
@@ -241,6 +347,7 @@
             launchSimula = ''
               # Use --local if you want to launch Simula locally (with godot binary from ./submodules/godot)
               if [ "''${1:-}" = "--local" ]; then
+                export IPC_IGNORE_VERSION=1
                 export XR_RUNTIME_JSON="./config/active_runtime.json"
                 GODOT_BINARY="./submodules/godot/bin/godot.x11.tools.64"
                 PROJECT_PATH="./."
@@ -300,7 +407,7 @@
                 mimic
                 xclip
                 xfce4-terminal-wrapped
-                midori-wrapped
+              # midori-wrapped
                 i3status-wrapped
                 xorg.xkbcomp
                 xwayland
@@ -315,6 +422,7 @@
                 runHook preInstall
 
                 ${copySimulaSourcesToNixStore}
+                rm -f $out/opt/simula/addons/godot-haskell-plugin/godot-haskell-gdwlroots.tar.gz
                 ${copyEnvironmentsToNixStore}
                 ${placeGodotHaskellPluginLib}
 
@@ -369,12 +477,26 @@
             };
 
             packages = {
-              inherit simula godot-haskell godot-haskell-plugin;
+              inherit simula godot-haskell godot-haskell-plugin godot-openxr;
+              simula-rgp = simulaRgpTool;
+              simula-monado-service-rgp = simulaMonadoServiceRgpTool;
               default = simula;
               treefmt = config.treefmt.build.wrapper;
             };
 
-            devShells.default = pkgs.mkShell rec {
+            apps = {
+              simula-rgp = {
+                type = "app";
+                program = "${simulaRgpTool}/bin/simula-rgp";
+              };
+              simula-monado-service-rgp = {
+                type = "app";
+                program = "${simulaMonadoServiceRgpTool}/bin/simula-monado-service-rgp";
+              };
+            };
+
+            devShells.default = pkgs.haskellPackages.shellFor {
+              packages = p: [ godot-haskell-plugin ];
               nativeBuildInputs = [
                 inputs.godot.packages."${system}".godot
 
@@ -383,15 +505,12 @@
                 pkgs.just
                 pkgs.inotify-tools
                 pkgs.cabal-install
-                pkgs.haskellPackages.ghc
+                pkgs.rgp
               ];
 
               buildInputs = [
-                haskell-dependencies
                 pkgs.zlib
               ];
-
-              LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
 
               shellHook = ''
                 export PS1="\n[nix-shell:\w]$ "
